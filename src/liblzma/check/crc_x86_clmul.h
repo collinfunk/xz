@@ -338,23 +338,18 @@ crc64_arch_optimized(const uint8_t *buf, size_t size, uint64_t crc)
 static inline bool
 is_arch_extension_supported(void)
 {
-	int success = 1;
 	uint32_t r[4]; // eax, ebx, ecx, edx
 
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || !defined(HAVE_CPUID_H)
 	// This needs <intrin.h> with MSVC. ICC has it as a built-in
-	// on all platforms.
+	// on all platforms. Solaris Developer Studio 12.6 has this
+	// as a builtin as well.
 	__cpuid((int *)r, 1);
-#elif defined(HAVE_CPUID_H)
-	// Compared to just using __asm__ to run CPUID, this also checks
-	// that CPUID is supported and saves and restores ebx as that is
-	// needed with GCC < 5 with position-independent code (PIC).
-	success = __get_cpuid(1, &r[0], &r[1], &r[2], &r[3]);
 #else
-	// Just a fallback that shouldn't be needed.
-	__asm__("cpuid\n\t"
-			: "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3])
-			: "a"(1), "c"(0));
+	// Compared to just using __asm__ to run CPUID, this also checks
+	// that CPUID is supported and saves and restores ebx when needed.
+	if (!__get_cpuid(1, &r[0], &r[1], &r[2], &r[3]))
+		return false;
 #endif
 
 	// Returns true if these are supported:
@@ -362,9 +357,10 @@ is_arch_extension_supported(void)
 	// SSSE3 (bit 9 in ecx)
 	// SSE4.1 (bit 19 in ecx)
 	const uint32_t ecx_mask = (1 << 1) | (1 << 9) | (1 << 19);
-	return success && (r[2] & ecx_mask) == ecx_mask;
+	return (r[2] & ecx_mask) == ecx_mask;
 
 	// Alternative methods that weren't used:
+	//   - Inline asm (in some cases one needs to save and restore ebx/rbx)
 	//   - ICC's _may_i_use_cpu_feature: the other methods should work too.
 	//   - GCC >= 6 / Clang / ICX __builtin_cpu_supports("pclmul")
 	//
