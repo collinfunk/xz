@@ -338,7 +338,7 @@ crc64_arch_optimized(const uint8_t *buf, size_t size, uint64_t crc)
 static inline bool
 is_arch_extension_supported(void)
 {
-	uint32_t r[4]; // eax, ebx, ecx, edx
+	unsigned int r[4]; // eax, ebx, ecx, edx
 
 #if defined(_MSC_VER) || !defined(HAVE_CPUID_H)
 	// This needs <intrin.h> with MSVC. ICC has it as a built-in
@@ -356,7 +356,7 @@ is_arch_extension_supported(void)
 	// CLMUL (bit 1 in ecx)
 	// SSSE3 (bit 9 in ecx)
 	// SSE4.1 (bit 19 in ecx)
-	const uint32_t ecx_mask = (1 << 1) | (1 << 9) | (1 << 19);
+	const unsigned int ecx_mask = (1 << 1) | (1 << 9) | (1 << 19);
 	return (r[2] & ecx_mask) == ecx_mask;
 
 	// Alternative methods that weren't used:
