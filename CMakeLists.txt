@@ -1345,6 +1345,23 @@ calculation (with runtime detection) if supported by the compiler" ON)
             HAVE_USABLE_CLMUL)
         tuklib_add_definition_if(liblzma HAVE_USABLE_CLMUL)
     endif()
+
+    # x86 SHA-256 intrinsics:
+    check_c_source_compiles("
+            #include <immintrin.h>
+            #if (defined(__GNUC__) || defined(__clang__)) \
+                    && !defined(__EDG__)
+            __attribute__((__target__(\"ssse3,sha\")))
+            #endif
+            int main(void)
+            {
+                __m128i a = _mm_set_epi32(1, 2, 3, 4);
+                a = _mm_sha256rnds2_epu32(a, a, a);
+                return 0;
+            }
+        "
+        HAVE_SHA256_X86)
+    tuklib_add_definition_if(liblzma HAVE_SHA256_X86)
 endif()
 
 # ARM64 C Language Extensions define CRC32 functions in arm_acle.h.

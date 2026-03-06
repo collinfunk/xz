@@ -24,7 +24,9 @@
 #endif
 
 #if defined(HAVE_INTERNAL_SHA256)
-// Nothing
+#	ifdef HAVE_SHA256_X86
+#		include <immintrin.h>
+#	endif
 #elif defined(HAVE_COMMONCRYPTO_COMMONDIGEST_H)
 #	include <CommonCrypto/CommonDigest.h>
 #elif defined(HAVE_SHA256_H)
@@ -43,6 +45,11 @@ typedef struct {
 
 	/// Size of the message excluding padding
 	uint64_t size;
+
+#ifdef HAVE_SHA256_X86
+	/// True if using special instructions to accelerate SHA-256
+	bool use_arch_extension;
+#endif
 } lzma_sha256_state;
 #elif defined(HAVE_CC_SHA256_CTX)
 typedef CC_SHA256_CTX lzma_sha256_state;
@@ -83,6 +90,9 @@ typedef struct {
 		uint8_t u8[64];
 		uint32_t u32[16];
 		uint64_t u64[8];
+#ifdef HAVE_SHA256_X86
+		__m128i m128[4];
+#endif
 	} buffer;
 
 	/// Check-specific data
@@ -90,6 +100,9 @@ typedef struct {
 		uint32_t crc32;
 		uint64_t crc64;
 		lzma_sha256_state sha256;
+#ifdef HAVE_SHA256_X86
+		__m128i dummy_to_ensure_alignment;
+#endif
 	} state;
 
 } lzma_check_state;

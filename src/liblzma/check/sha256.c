@@ -9,6 +9,9 @@
 //  Crypto++ Library 5.5.1 released in 2007: https://www.cryptopp.com/
 //  A few minor tweaks have been made in liblzma.
 //
+//  The x86 intrinsics code is based on Intel documentation:
+//  https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sha-extensions.html
+//
 //  Authors:    Wei Dai
 //              Lasse Collin
 //
@@ -16,6 +19,54 @@
 
 #include "check.h"
 
+// If defined, generic C version is built. This will be undefined when
+// compiler flags allow unconditional use of the SHA-256 instructions.
+#define SHA256_GENERIC 1
+
+#ifdef HAVE_SHA256_X86
+#	include <immintrin.h>
+#	if defined(__SHA__)
+		// No need for a runtime check or the generic C code.
+#		undef SHA256_GENERIC
+#		define is_arch_extension_supported() true
+#	elif defined(_MSC_VER)
+#		include <intrin.h>
+#	else
+#		include <cpuid.h>
+#	endif
+#endif
+
+
+#if defined(HAVE_SHA256_X86) && defined(SHA256_GENERIC)
+static bool
+is_arch_extension_supported(void)
+{
+	unsigned int r[4]; // eax, ebx, ecx, edx
+
+#if defined(_MSC_VER) || !defined(HAVE_CPUID_H)
+	__cpuid((int *)r, 0);
+	if (r[0] < 7)
+		return false;
+
+	__cpuidex((int *)r, 7, 0);
+#else
+	// Old GCC lacks __get_cpuid_count(), so use two steps:
+	if (__get_cpuid_max(0, NULL) < 7)
+		return false;
+
+	__cpuid_count(7, 0, r[0], r[1], r[2], r[3]);
+#endif
+
+	// Bit 29 in ebx indicates support for SHA-1 and SHA-256 extensions.
+	// If it is set, we assume that the other required extensions like
+	// SSSE3 are also supported (we need PSHUFB and PALIGNR).
+	return (r[1] & (1 << 29)) != 0;
+}
+#endif
+
+
+// Align the constants for SSE2 instructions.
+alignas(16)
 static const uint32_t SHA256_K[64] = {
 	0x428A2F98, 0x71374491, 0xB5C0FBCF, 0xE9B5DBA5,
 	0x3956C25B, 0x59F111F1, 0x923F82A4, 0xAB1C5ED5,
@@ -36,6 +87,7 @@ static const uint32_t SHA256_K[64] = {
 };
 
 
+#ifdef SHA256_GENERIC
 // Rotate a uint32_t. GCC can optimize this to a rotate instruction
 // at least on x86.
 static inline uint32_t
@@ -106,12 +158,144 @@ transform(uint32_t state[8], const uint32_t data[16])
 	state[6] += g(0);
 	state[7] += h(0);
 }
+#endif // SHA256_GENERIC
+
+
+#ifdef HAVE_SHA256_X86
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__EDG__)
+__attribute__((__target__("ssse3,sha")))
+#endif
+static void
+transform_arch_optimized(__m128i state[2], const __m128i data[4])
+{
+	const __m128i byteswap_mask = _mm_set_epi32(
+			0x0C0D0E0F, 0x08090A0B, 0x04050607, 0x00010203);
+
+	__m128i state0 = state[0];
+	__m128i state1 = state[1];
+
+	__m128i msg;
+	__m128i msgtmp0;
+	__m128i msgtmp1;
+	__m128i msgtmp2;
+	__m128i msgtmp3;
+
+	// Rounds 0-3
+	msgtmp0 = _mm_shuffle_epi8(data[0], byteswap_mask);
+	msg = _mm_add_epi32(msgtmp0,
+			_mm_load_si128((const __m128i *)(SHA256_K + 0)));
+	state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+	msg = _mm_shuffle_epi32(msg, 0x0E);
+	state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+
+	// Rounds 4-7
+	msgtmp1 = _mm_shuffle_epi8(data[1], byteswap_mask);
+	msg = _mm_add_epi32(msgtmp1,
+			_mm_load_si128((const __m128i *)(SHA256_K + 4)));
+	state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+	msg = _mm_shuffle_epi32(msg, 0x0E);
+	state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+	msgtmp0 = _mm_sha256msg1_epu32(msgtmp0, msgtmp1);
+
+	// Rounds 8-11
+	msgtmp2 = _mm_shuffle_epi8(data[2], byteswap_mask);
+	msg = _mm_add_epi32(msgtmp2,
+			_mm_load_si128((const __m128i *)(SHA256_K + 8)));
+	state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+	msg = _mm_shuffle_epi32(msg, 0x0E);
+	state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+	msgtmp1 = _mm_sha256msg1_epu32(msgtmp1, msgtmp2);
+
+	// Prepare for round 12
+	msgtmp3 = _mm_shuffle_epi8(data[3], byteswap_mask);
+
+	for (size_t j = 12; ; j += 16) {
+		// Rounds 12-15, 28-31, 44-47
+		msg = _mm_add_epi32(msgtmp3,
+			_mm_load_si128((const __m128i *)(SHA256_K + j)));
+		state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+		msgtmp0 = _mm_add_epi32(msgtmp0,
+			_mm_alignr_epi8(msgtmp3, msgtmp2, 4));
+		msgtmp0 = _mm_sha256msg2_epu32(msgtmp0, msgtmp3);
+		msg = _mm_shuffle_epi32(msg, 0x0E);
+		state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+		msgtmp2 = _mm_sha256msg1_epu32(msgtmp2, msgtmp3);
+
+		// Rounds 16-19, 32-35, 48-51
+		msg = _mm_add_epi32(msgtmp0,
+			_mm_load_si128((const __m128i *)(SHA256_K + j + 4)));
+		state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+		msgtmp1 = _mm_add_epi32(msgtmp1,
+			_mm_alignr_epi8(msgtmp0, msgtmp3, 4));
+		msgtmp1 = _mm_sha256msg2_epu32(msgtmp1, msgtmp0);
+		msg = _mm_shuffle_epi32(msg, 0x0E);
+		state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+		msgtmp3 = _mm_sha256msg1_epu32(msgtmp3, msgtmp0);
+
+		// Rounds 20-23, 36-39, 52-55
+		msg = _mm_add_epi32(msgtmp1,
+			_mm_load_si128((const __m128i *)(SHA256_K + j + 8)));
+		state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+		msgtmp2 = _mm_add_epi32(msgtmp2,
+			_mm_alignr_epi8(msgtmp1, msgtmp0, 4));
+		msgtmp2 = _mm_sha256msg2_epu32(msgtmp2, msgtmp1);
+		msg = _mm_shuffle_epi32(msg, 0x0E);
+		state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+
+		if (j == 52 - 8)
+			break;
+
+		msgtmp0 = _mm_sha256msg1_epu32(msgtmp0, msgtmp1);
+
+		// Rounds 24-27, 40-43
+		msg = _mm_add_epi32(msgtmp2,
+			_mm_load_si128((const __m128i *)(SHA256_K + j + 12)));
+		state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+		msgtmp3 = _mm_add_epi32(msgtmp3,
+			_mm_alignr_epi8(msgtmp2, msgtmp1, 4));
+		msgtmp3 = _mm_sha256msg2_epu32(msgtmp3, msgtmp2);
+		msg = _mm_shuffle_epi32(msg, 0x0E);
+		state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+		msgtmp1 = _mm_sha256msg1_epu32(msgtmp1, msgtmp2);
+	}
+
+	// Rounds 56-59
+	msg = _mm_add_epi32(msgtmp2,
+			_mm_load_si128((const __m128i *)(SHA256_K + 56)));
+	state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+	msgtmp3 = _mm_add_epi32(msgtmp3, _mm_alignr_epi8(msgtmp2, msgtmp1, 4));
+	msgtmp3 = _mm_sha256msg2_epu32(msgtmp3, msgtmp2);
+	msg = _mm_shuffle_epi32(msg, 0x0E);
+	state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+
+	// Rounds 60-63
+	msg = _mm_add_epi32(msgtmp3,
+			_mm_load_si128((const __m128i *)(SHA256_K + 60)));
+	state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
+	msg = _mm_shuffle_epi32(msg, 0x0E);
+	state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+
+	// Add the working vars back into state[].
+	state[0] = _mm_add_epi32(state[0], state0);
+	state[1] = _mm_add_epi32(state[1], state1);
+}
+#endif
 
 
 static void
 process(lzma_check_state *check)
 {
-	transform(check->state.sha256.state, check->buffer.u32);
+#ifdef HAVE_SHA256_X86
+	if (check->state.sha256.use_arch_extension) {
+		transform_arch_optimized((__m128i *)check->state.sha256.state,
+				check->buffer.m128);
+	} else
+#endif
+	{
+#ifdef SHA256_GENERIC
+		transform(check->state.sha256.state, check->buffer.u32);
+#endif
+	}
 	return;
 }
 
@@ -124,9 +308,32 @@ lzma_sha256_init(lzma_check_state *check)
 		0x510E527F, 0x9B05688C, 0x1F83D9AB, 0x5BE0CD19,
 	};
 
-	memcpy(check->state.sha256.state, s, sizeof(s));
-	check->state.sha256.size = 0;
+#ifdef HAVE_SHA256_X86
+	check->state.sha256.use_arch_extension = is_arch_extension_supported();
+	if (check->state.sha256.use_arch_extension) {
+		// In s[], there are 8 32-bit values in the order ABCDEFGH.
+		// However, the sha256rnds2 instruction takes the state as two
+		// xmm operands where the little endian order is ABEF and CDGH.
+		//
+		// ABEF:
+		check->state.sha256.state[0] = s[5];
+		check->state.sha256.state[1] = s[4];
+		check->state.sha256.state[2] = s[1];
+		check->state.sha256.state[3] = s[0];
+		// CDGH:
+		check->state.sha256.state[4] = s[7];
+		check->state.sha256.state[5] = s[6];
+		check->state.sha256.state[6] = s[3];
+		check->state.sha256.state[7] = s[2];
+	} else
+#endif
+	{
+#ifdef SHA256_GENERIC
+		memcpy(check->state.sha256.state, s, sizeof(s));
+#endif
+	}
 
+	check->state.sha256.size = 0;
 	return;
 }
 
@@ -181,6 +388,24 @@ lzma_sha256_finish(lzma_check_state *check)
 	check->buffer.u64[(64 - 8) / 8] = conv64be(check->state.sha256.size);
 
 	process(check);
+
+#ifdef HAVE_SHA256_X86
+	if (check->state.sha256.use_arch_extension) {
+		const uint32_t tmp[8] = {
+			// Convert from ABEF CDGH to ABCDEFGH, reversing
+			// what was described in lzma_sha256_init().
+			check->state.sha256.state[3],
+			check->state.sha256.state[2],
+			check->state.sha256.state[7],
+			check->state.sha256.state[6],
+			check->state.sha256.state[1],
+			check->state.sha256.state[0],
+			check->state.sha256.state[5],
+			check->state.sha256.state[4],
+		};
+		memcpy(check->state.sha256.state, tmp, sizeof(tmp));
+	}
+#endif
 
 	for (size_t i = 0; i < 8; ++i)
 		check->buffer.u32[i] = conv32be(check->state.sha256.state[i]);

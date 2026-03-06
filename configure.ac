@@ -1136,6 +1136,26 @@ int main(void)
 	AC_MSG_RESULT([$enable_clmul_crc])
 ])
 
+AC_MSG_CHECKING([if _mm_sha256rnds2_epu32 is usable])
+AC_LINK_IFELSE([AC_LANG_SOURCE([[
+#include <immintrin.h>
+#if (defined(__GNUC__) || defined(__clang__)) && !defined(__EDG__)
+__attribute__((__target__("ssse3,sha")))
+#endif
+int main(void)
+{
+	__m128i a = _mm_set_epi32(1, 2, 3, 4);
+	a = _mm_sha256rnds2_epu32(a, a, a);
+	return 0;
+}
+]])], [
+	AC_DEFINE([HAVE_SHA256_X86], [1],
+		[Define to 1 if _mm_sha256rnds2_epu32 is usable.])
+	AC_MSG_RESULT([yes])
+], [
+	AC_MSG_RESULT([no])
+])
+
 # ARM64 C Language Extensions define CRC32 functions in arm_acle.h.
 # These are supported by at least GCC and Clang which both need
 # __attribute__((__target__("+crc"))), unless the needed compiler flags
